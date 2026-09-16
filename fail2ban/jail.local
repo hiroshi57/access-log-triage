@@ -1,0 +1,25 @@
+# /etc/fail2ban/jail.local
+#
+# wordpress-auth フィルタを使ったログイン総当たり遮断の jail 定義。
+# jail.conf の既定は maxretry=5 / findtime=10m / bantime=10m
+# (= 10 分以内に 5 回で 10 分 BAN)。
+#
+# 反映前に必ず実ログで当たりを確認する(BAN はしない):
+#   fail2ban-regex /var/log/nginx/access.log /etc/fail2ban/filter.d/wordpress-auth.conf
+
+[wordpress-auth]
+enabled  = true
+filter   = wordpress-auth
+port     = http,https
+logpath  = /var/log/nginx/access.log
+# 正規の打ち間違いを弾かない程度に緩める
+maxretry = 10
+findtime = 10m
+bantime  = 1h
+# 自社オフィス・監視サービス・決済/予約 Webhook の IP を必ず入れる。
+# 自分が締め出されるのが最も多い事故。
+ignoreip = 127.0.0.1/8 ::1 203.0.113.0/24
+
+# 繰り返し BAN される常習者を長期 BAN(既定 bantime 1w / findtime 1d)
+[recidive]
+enabled = true
