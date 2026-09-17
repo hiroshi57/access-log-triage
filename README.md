@@ -55,6 +55,43 @@ LOGS="/var/log/nginx/access.log /var/log/nginx/access.log.1 /var/log/nginx/acces
 
 まずはここを 1 回流すところから始めてください。
 
+### 実行例：サンプルログで「読み方」をつかむ
+
+次のような 6 行のログがあったとします（`$1`=IP、`$6`=メソッド、`$7`=パス、`$9`=ステータス、`$10`=サイズ）。
+
+```text
+203.0.113.10 - - [10/Sep/2026:07:12:33 +0900] "POST /wp-login.php HTTP/1.1" 200 1234 "-" "curl/8.5.0"
+203.0.113.10 - - [10/Sep/2026:07:12:34 +0900] "POST /wp-login.php HTTP/1.1" 200 1234 "-" "curl/8.5.0"
+198.51.100.5 - - [10/Sep/2026:07:13:00 +0900] "GET /.env HTTP/1.1" 200 512 "-" "Mozilla/5.0"
+198.51.100.5 - - [10/Sep/2026:07:13:01 +0900] "GET /wp-config.php.bak HTTP/1.1" 404 0 "-" "Mozilla/5.0"
+198.51.100.5 - - [10/Sep/2026:07:13:02 +0900] "GET /phpinfo.php HTTP/1.1" 404 0 "-" "sqlmap"
+192.0.2.1 - - [10/Sep/2026:07:14:00 +0900] "GET /index.html HTTP/1.1" 200 8000 "-" "Mozilla/5.0"
+```
+
+`LOGS=/path/to/sample.log bash scripts/aggregate.sh` の出力（抜粋）と読み方：
+
+```text
+== 集計2: ログイン系(wp-login.php / xmlrpc.php)への POST 上位20 ==
+      2 203.0.113.10          ← wp-login.php に POST を連打。総当たりの常連。fail2ban 対象
+== 集計3: 404 を量産している IP 上位20 ==
+      2 198.51.100.5          ← 存在しないパスを片端から叩く。脆弱性スキャナの動き
+== 集計4: 何を探されているか(404 のパス) 上位30 ==
+      1 /wp-config.php.bak    ← 「200 を返してはいけないパス」一覧。設定確認に使う
+      1 /phpinfo.php
+== 集計5: 2xx で返ってしまっている要注意パス(最重要・空であること) ==
+      1 /.env                 ← ★ これが最悪。/.env が 200 で配信済み = 環境変数が流出
+== 集計7: User-Agent の偏り 上位20 ==
+      1 sqlmap                ← 明らかな攻撃ツール名（ただし UA は詐称可能なので単独判断はしない）
+```
+
+**この例での動き方**：
+
+1. 集計 5 に `/.env` が出た → **最優先で対応**。`.env` ファイルを削除し、そこに書かれていた DB パスワード・API キー・認証情報を**すべて再発行**する（遮断より先）。
+2. 集計 2 の `203.0.113.10` → ログイン総当たりの常連。`fail2ban/` の設定で自動遮断へ。
+3. 集計 3・4 の `198.51.100.5` → スキャナ。`/.env` `/phpinfo.php` などに 200 を返さない設定（アクセス制限）を確認。
+
+> 実運用では 1 位が数千〜数万リクエストになります。桁が 1 つ飛び抜けている行だけを追えば十分です。
+
 ---
 
 ## 日次で回す（差分だけ見る）
@@ -69,6 +106,18 @@ LOGS="/var/log/nginx/access.log /var/log/nginx/access.log.1 /var/log/nginx/acces
 ```
 
 毎日全文を読む運用は続きません。増えた行があるときだけ元ログを開くのがコツです。
+
+**差分の読み方の例**（前日→当日で `diff -u` が出す形）：
+
+```diff
+ == 404を出しているIP 上位10 ==
+       2 198.51.100.5
++     87 45.146.164.110      ← 昨日いなかった IP が急に 87 件。新しいスキャナが来た合図
+ == 2xxで返っている要注意パス(空であること) ==
++      1 /.git/config        ← ★ 昨日まで空だったのに 1 行増えた。即対応
+```
+
+`+` の行（＝昨日から増えた分）だけ見れば、その日に何が起きたかが分かります。差分が空の日はメールが空 or 変化なし。増えた日だけ元ログを開きます。
 
 ---
 
@@ -86,6 +135,33 @@ fail2ban-regex /var/log/nginx/access.log /etc/fail2ban/filter.d/wordpress-auth.c
 fail2ban-client reload
 fail2ban-client status wordpress-auth              # 現在の BAN 一覧
 fail2ban-client set wordpress-auth unbanip 203.0.113.10   # 誤爆の解除
+```
+
+`fail2ban-regex` の出力例（`Matched` が 0 のままなら正規表現かログパスがずれている）：
+
+```text
+Results
+=======
+Failregex: 342 total
+|-  #) [# of hits] regular expression
+|   1) [342] ^<HOST> .* "POST [^"]*/(wp-login\.php|xmlrpc\.php)
+`-
+
+Lines: 51234 lines, 0 ignored, 342 matched, 50892 missed
+```
+
+`status` の出力例（`203.0.113.10` が実際に BAN された状態）：
+
+```text
+Status for the jail: wordpress-auth
+|- Filter
+|  |- Currently failed: 3
+|  |- Total failed:     342
+|  `- File list:        /var/log/nginx/access.log
+`- Actions
+   |- Currently banned: 1
+   |- Total banned:     1
+   `- Banned IP list:   203.0.113.10
 ```
 
 ### 誤爆させないための 3 点
