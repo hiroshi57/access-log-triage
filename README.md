@@ -27,6 +27,42 @@ tail -1 /var/log/nginx/access.log
 
 反映後、自分の回線でサイトを開き `tail -1` に自分の IP が出れば準備完了です。
 
+#### Cloudflare 全レンジの取得ワンライナー
+
+`set_real_ip_from` / `RemoteIPTrustedProxy` に列挙する Cloudflare のレンジは、公式が [https://www.cloudflare.com/ips/](https://www.cloudflare.com/ips/) で公開しています。手打ちせず API から取得します（IPv4 + IPv6 両方）。生成スクリプトは [`scripts/gen-cloudflare-realip.sh`](scripts/gen-cloudflare-realip.sh) にもまとめてあります。
+
+```bash
+# nginx 用: set_real_ip_from 行を生成 → /etc/nginx/conf.d/cloudflare-realip.conf へ
+{ curl -fsS https://www.cloudflare.com/ips-v4; echo; curl -fsS https://www.cloudflare.com/ips-v6; } \
+  | sed '/^$/d; s/^/set_real_ip_from /; s/$/;/'
+```
+
+```bash
+# Apache 用: RemoteIPTrustedProxy 行を生成
+{ curl -fsS https://www.cloudflare.com/ips-v4; echo; curl -fsS https://www.cloudflare.com/ips-v6; } \
+  | sed '/^$/d; s/^/RemoteIPTrustedProxy /'
+```
+
+出力イメージ（nginx 用）：
+
+```nginx
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+...
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+...
+```
+
+Cloudflare のレンジは追加・変更されることがあるので、**cron で月 1 回程度更新**し、変化があったら reload するのが安全です。
+
+```cron
+# 毎月 1 日 4:10 にレンジを更新し、差分があれば nginx を reload
+10 4 1 * * /usr/local/bin/gen-cloudflare-realip.sh --nginx -o /etc/nginx/conf.d/cloudflare-realip.conf --reload
+```
+
+> ⚠️ ここで列挙した「信頼するプロキシ」だけがヘッダの IP を差し替えられます。`0.0.0.0/0` のように全開にすると誰でも IP を詐称できるので、必ず経路のレンジだけを書きます。
+
 ---
 
 ## 7 つの集計
